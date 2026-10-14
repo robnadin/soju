@@ -50,11 +50,27 @@ class LibraryTests(unittest.TestCase):
         self.put(self.base / 'epic-bottle/drive_c/Games/Epic/Game.exe', '')
         self.put(self.base / 'epic-bottle/drive_c/ProgramData/Epic/EpicGamesLauncher/Data/Manifests' / (uid + '.item'), json.dumps(item))
 
-    def bnet(self, uid='osi', folder='Diablo'):
-        prefix = self.base / 'bottle'
-        self.put(prefix / 'drive_c/Games' / folder / '.build.info', 'build')
+    def bnet_record(self, uid, folder, installed=None, playable=None):
         record = field(1, uid.encode()) + field(3, field(1, ('C:/Games/' + folder).encode()))
+        state = b''
+        for n, value in [(1, installed), (2, playable)]:
+            if value is not None:
+                state += bytes([n * 8, int(value)])
+        if state:
+            record += field(4, field(1, state))
+        return record
+
+    def bnet(self, uid='osi', folder='Diablo', build_info=True,
+             local_manifest=False, installed=None, playable=None):
+        prefix = self.base / 'bottle'
+        location = prefix / 'drive_c/Games' / folder
+        if build_info:
+            self.put(location / '.build.info', 'build')
+        record = self.bnet_record(uid, folder, installed, playable)
+        if local_manifest:
+            self.put(location / '.product.db', record)
         self.put(prefix / 'drive_c/ProgramData/Battle.net/Agent/product.db', field(1, record))
+        return location
 
     def gog(self, uid='77', name='GOG game'):
         path = self.base / 'gog-bottle/drive_c/Custom/GOG game'
@@ -121,6 +137,117 @@ class LibraryTests(unittest.TestCase):
         result = self.lib.scan()
         self.assertEqual(result['games'][0]['title'], 'Future game')
         with self.assertRaisesRegex(ValueError, 'official launcher'): self.lib.command('battlenet:future')
+
+    def test_warcraft_remasters_legacy_installation_and_launch(self):
+        for uid, title, code in [('w1r', 'Warcraft I: Remastered', 'W1R'),
+                                 ('w2r', 'Warcraft II: Remastered', 'W2R')]:
+            with self.subTest(uid=uid):
+                self.bnet(uid, title, build_info=False, local_manifest=True,
+                          installed=True, playable=True)
+                result = self.lib.scan()
+                self.assertEqual(result['warnings'], [])
+                self.assertEqual([g['id'] for g in result['games']], ['battlenet:' + uid])
+                self.assertEqual(result['games'][0]['title'], title)
+                self.assertEqual(self.lib.command('battlenet:' + uid)[-2:],
+                                 ['battlenet', '--exec=launch ' + code])
+
+    def test_classic_warcraft_legacy_installation_and_launch(self):
+        for uid, folder, title, code in [
+                ('w1', 'Warcraft I', 'Warcraft: Orcs & Humans', 'W1'),
+                ('w2bn', 'Warcraft II', 'Warcraft II: Battle.net Edition', 'W2BN')]:
+            with self.subTest(uid=uid):
+                self.bnet(uid, folder, build_info=False, local_manifest=True,
+                          installed=True, playable=True)
+                result = self.lib.scan()
+                self.assertEqual(result['warnings'], [])
+                self.assertEqual([g['id'] for g in result['games']], ['battlenet:' + uid])
+                self.assertEqual(result['games'][0]['title'], title)
+                self.assertEqual(self.lib.command('battlenet:' + uid)[-2:],
+                                 ['battlenet', '--exec=launch ' + code])
+
+    def test_battlenet_stale_record_without_installation_metadata_is_skipped(self):
+        self.bnet('future', 'Future game', build_info=False)
+        self.put(self.base / 'bottle/drive_c/Games/Future game/Launcher.db', '')
+        self.assertEqual(self.lib.scan()['games'], [])
+        with self.assertRaisesRegex(ValueError, 'no longer installed'):
+            self.lib.command('battlenet:future')
+
+    def test_battlenet_executable_alone_is_not_installation_evidence(self):
+        self.bnet('future', 'Future game', build_info=False)
+        self.put(self.base / 'bottle/drive_c/Games/Future game/x86/Warcraft.exe', '')
+        self.assertEqual(self.lib.scan()['games'], [])
+
+    def test_unmapped_battlenet_game_can_use_local_product_metadata(self):
+        self.bnet('future', 'Future game', build_info=False, local_manifest=True,
+                  installed=True, playable=True)
+        result = self.lib.scan()
+        self.assertEqual(result['games'][0]['title'], 'Future game')
+        with self.assertRaisesRegex(ValueError, 'official launcher'):
+            self.lib.command('battlenet:future')
+
+    def test_battlenet_local_manifest_must_match_product_and_path(self):
+        location = self.bnet('w1r', 'Warcraft', build_info=False, local_manifest=True,
+                             installed=True, playable=True)
+        for uid, folder in [('w2r', 'Warcraft'), ('w1r', 'Other game')]:
+            with self.subTest(uid=uid, folder=folder):
+                self.put(location / '.product.db', self.bnet_record(uid, folder, True, True))
+                self.assertEqual(self.lib.scan()['games'], [])
+
+    def test_battlenet_explicitly_uninstalled_records_are_skipped(self):
+        for build_info, local_manifest in [(True, False), (False, True)]:
+            with self.subTest(build_info=build_info):
+                self.bnet('w1r', 'Warcraft ' + str(build_info), build_info=build_info,
+                          local_manifest=local_manifest, installed=False, playable=False)
+                self.assertEqual(self.lib.scan()['games'], [])
+
+    def test_battlenet_local_uninstalled_state_overrides_stale_agent_record(self):
+        location = self.bnet('w1r', 'Warcraft', build_info=False, local_manifest=True,
+                             installed=True, playable=True)
+        self.put(location / '.product.db', self.bnet_record('w1r', 'Warcraft', False, False))
+        self.assertEqual(self.lib.scan()['games'], [])
+
+    def test_battlenet_unplayable_installations_require_official_launcher(self):
+        for build_info in [True, False]:
+            with self.subTest(build_info=build_info):
+                self.bnet('w1r', 'Warcraft ' + str(build_info), build_info=build_info,
+                          local_manifest=not build_info, installed=True, playable=False)
+                result = self.lib.scan()
+                self.assertEqual(len(result['games']), 1)
+                with self.assertRaisesRegex(ValueError, 'Finish'):
+                    self.lib.command('battlenet:w1r')
+
+    def test_battlenet_local_unplayable_state_blocks_stale_agent_playability(self):
+        location = self.bnet('w1r', 'Warcraft', build_info=False, local_manifest=True,
+                             installed=True, playable=True)
+        self.put(location / '.product.db', self.bnet_record('w1r', 'Warcraft', True, False))
+        with self.assertRaisesRegex(ValueError, 'Finish'):
+            self.lib.command('battlenet:w1r')
+
+    def test_battlenet_completed_local_install_overrides_stale_agent_playability(self):
+        location = self.bnet('w1r', 'Warcraft', build_info=False, local_manifest=True,
+                             installed=True, playable=False)
+        self.put(location / '.product.db', self.bnet_record('w1r', 'Warcraft', True, True))
+        self.assertEqual(self.lib.command('battlenet:w1r')[-1], '--exec=launch W1R')
+
+    def test_battlenet_malformed_local_manifest_does_not_hide_other_platforms(self):
+        self.steam()
+        location = self.bnet('w1r', 'Warcraft', build_info=False, local_manifest=True,
+                             installed=True, playable=True)
+        self.put(location / '.product.db', b'\x0a\x10abc')
+        result = self.lib.scan()
+        self.assertEqual([g['id'] for g in result['games']], ['steam:123'])
+        self.assertEqual(len(result['warnings']), 1)
+
+    def test_battlenet_local_metadata_without_installation_state_is_not_enough(self):
+        self.bnet('future', 'Future game', build_info=False, local_manifest=True)
+        self.assertEqual(self.lib.scan()['games'], [])
+
+    def test_battlenet_deleted_directory_is_skipped_even_if_agent_says_installed(self):
+        location = self.bnet('w1r', 'Warcraft', build_info=False, local_manifest=True,
+                             installed=True, playable=True)
+        (location / '.product.db').unlink()
+        location.rmdir()
+        self.assertEqual(self.lib.scan()['games'], [])
 
     def test_gog_fallback_and_dlc_filter(self):
         root = self.base / 'gog-bottle/drive_c/GOG Games/Sample'

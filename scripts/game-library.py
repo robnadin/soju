@@ -30,6 +30,8 @@ BNET = {
     'diablo3': ('Diablo III', 'D3'), 'fen': ('Diablo IV', 'Fen'),
     'wow': ('World of Warcraft', 'WoW'),
     's2': ('StarCraft II', 'S2'), 's1': ('StarCraft: Remastered', 'S1'),
+    'w1': ('Warcraft: Orcs & Humans', 'W1'), 'w1r': ('Warcraft I: Remastered', 'W1R'),
+    'w2bn': ('Warcraft II: Battle.net Edition', 'W2BN'), 'w2r': ('Warcraft II: Remastered', 'W2R'),
     'w3': ('Warcraft III', 'W3'), 'hs_beta': ('Hearthstone', 'WTCG'),
     'heroes': ('Heroes of the Storm', 'Hero'), 'prometheus': ('Overwatch 2', 'Pro'),
 }
@@ -133,6 +135,41 @@ def first_file(paths):
     return next((str(p) for p in paths if p.is_file()), None)
 
 
+def battlenet_product_state(fields):
+    cached = protobuf(fields.get(4, [b''])[0])
+    state = protobuf(cached.get(1, [b''])[0])
+    flags = [state.get(n, [None])[0] for n in (1, 2)]
+    if any(value is not None and (type(value) is not int or value not in (0, 1))
+           for value in flags):
+        raise ValueError('invalid Battle.net installation state')
+    return flags
+
+
+def battlenet_installation_state(prefix, location, uid, fields):
+    """Return readiness, or None when no installation can be verified."""
+    installed, playable = battlenet_product_state(fields)
+    if installed == 0 or not location.is_dir():
+        return None
+    if (location / '.build.info').is_file():
+        return playable != 0
+
+    # Non-CASC games can carry a local ProductInstall record instead.
+    manifest = location / '.product.db'
+    if not manifest.is_file():
+        return None
+    local = protobuf(read_bytes(manifest))
+    if local[1][0].decode('utf-8').casefold() != uid.casefold():
+        return None
+    settings = protobuf(local[3][0])
+    if windows_path(prefix, settings[1][0].decode('utf-8')) != location:
+        return None
+    local_installed, local_playable = battlenet_product_state(local)
+    if local_installed == 0 or (installed != 1 and local_installed != 1):
+        return None
+    # The local completion record can be newer than the Agent's cached state.
+    return (local_playable if local_playable is not None else playable) != 0
+
+
 class Library:
     def __init__(self, base):
         self.base = Path(base).expanduser().absolute()
@@ -231,7 +268,9 @@ class Library:
                 settings = protobuf(fields[3][0])
                 location = windows_path(prefix, settings[1][0].decode('utf-8'))
                 # An Agent record can outlive an uninstall or partial download.
-                if not (location / '.build.info').is_file(): continue
+                ready = battlenet_installation_state(prefix, location, uid, fields)
+                if ready is None:
+                    continue
                 title, code = BNET.get(uid.casefold(), (location.name, None))
                 arguments = ['--exec=launch ' + code] if code else []
                 art = first_file(sorted(location.glob('*.ico')))
@@ -241,7 +280,7 @@ class Library:
                     for exe in executables[:4]:
                         art = executable_icon(exe, self.base / 'library-artwork')
                         if art: break
-                self.add('battlenet', uid, title, location, arguments, art)
+                self.add('battlenet', uid, title, location, arguments, art, ready)
             except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
                 self.warn('battlenet', 'An installation record could not be read. Refresh after Battle.net finishes updating.')
 
