@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('library', ROOT / 'scripts/game-library.py')
@@ -248,6 +249,65 @@ class LibraryTests(unittest.TestCase):
         (location / '.product.db').unlink()
         location.rmdir()
         self.assertEqual(self.lib.scan()['games'], [])
+
+    def test_warcraft_remaster_artwork_comes_from_x86_executables(self):
+        for uid, folder, executable in [('w1r', 'Warcraft I', 'Warcraft.exe'),
+                                         ('w2r', 'Warcraft II', 'Warcraft II.exe')]:
+            with self.subTest(uid=uid):
+                location = self.bnet(uid, folder, build_info=False, local_manifest=True,
+                                     installed=True, playable=True)
+                game = self.put(location / 'x86' / executable, 'game')
+                with patch.object(library, 'executable_icon', return_value='game.ico') as extract:
+                    self.assertEqual(self.lib.scan()['games'][0]['artwork'], 'game.ico')
+                extract.assert_called_once_with(game, self.base / 'library-artwork')
+
+    def test_battlenet_artwork_finds_x64_executables_with_uppercase_extension(self):
+        location = self.bnet()
+        game = self.put(location / 'x64/Game.EXE', 'game')
+        with patch.object(library, 'executable_icon', return_value='game.ico') as extract:
+            self.assertEqual(self.lib.scan()['games'][0]['artwork'], 'game.ico')
+        extract.assert_called_once_with(game, self.base / 'library-artwork')
+
+    def test_battlenet_artwork_ignores_larger_helper_executables(self):
+        location = self.bnet()
+        game = self.put(location / 'x86/Game.exe', 'game')
+        for name in ['BlizzardBrowser.exe', 'BlizzardError.exe', 'UnityCrashHandler64.exe',
+                     'CrashReporter.exe', 'Game Map Editor.exe', 'Game Launcher.exe',
+                     'unins000.exe']:
+            self.put(location / 'x86' / name, 'helper' * 100)
+        with patch.object(library, 'executable_icon', return_value='game.ico') as extract:
+            self.assertEqual(self.lib.scan()['games'][0]['artwork'], 'game.ico')
+        extract.assert_called_once_with(game, self.base / 'library-artwork')
+
+    def test_battlenet_root_icon_retains_priority(self):
+        location = self.bnet()
+        icon = self.put(location / 'Game.ICO', '')
+        self.put(location / 'x86/Game.exe', 'game')
+        with patch.object(library, 'executable_icon') as extract:
+            self.assertEqual(self.lib.scan()['games'][0]['artwork'], str(icon))
+        extract.assert_not_called()
+
+    def test_battlenet_artwork_falls_back_to_nested_executable_when_root_has_no_icon(self):
+        location = self.bnet()
+        root_game = self.put(location / 'Game.exe', 'root game')
+        nested_game = self.put(location / 'x86/Game.exe', 'game')
+        with patch.object(library, 'executable_icon', side_effect=[None, 'game.ico']) as extract:
+            self.assertEqual(self.lib.scan()['games'][0]['artwork'], 'game.ico')
+        self.assertEqual([call.args[0] for call in extract.call_args_list], [root_game, nested_game])
+
+    def test_battlenet_artwork_does_not_search_unrelated_data_directories(self):
+        location = self.bnet()
+        self.put(location / 'Data/Files/Other.exe', 'other')
+        with patch.object(library, 'executable_icon') as extract:
+            self.assertIsNone(self.lib.scan()['games'][0]['artwork'])
+        extract.assert_not_called()
+
+    def test_battlenet_artwork_does_not_treat_crash_in_a_game_name_as_a_helper(self):
+        location = self.bnet()
+        game = self.put(location / 'CrashBandicoot.exe', 'game')
+        with patch.object(library, 'executable_icon', return_value='game.ico') as extract:
+            self.assertEqual(self.lib.scan()['games'][0]['artwork'], 'game.ico')
+        extract.assert_called_once_with(game, self.base / 'library-artwork')
 
     def test_gog_fallback_and_dlc_filter(self):
         root = self.base / 'gog-bottle/drive_c/GOG Games/Sample'

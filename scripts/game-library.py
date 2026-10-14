@@ -135,6 +135,34 @@ def first_file(paths):
     return next((str(p) for p in paths if p.is_file()), None)
 
 
+def battlenet_artwork(location, cache):
+    """Search the install root and standard architecture folders, not game data."""
+    directories = [location] + [case_path(location, (arch,)) for arch in ('x86', 'x64')]
+    helpers = ('launcher', 'uninstall', 'browser', 'editor', 'crashhandler',
+               'crashreport', 'crashpad', 'errorhandler', 'errorreport', 'blizzarderror')
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        files = [p for p in directory.iterdir() if p.is_file()]
+        art = first_file(sorted(p for p in files if p.suffix.casefold() == '.ico'))
+        if art:
+            return art
+        executables = []
+        for path in files:
+            if path.suffix.casefold() != '.exe':
+                continue
+            name = re.sub(r'[\s_.-]+', '', path.stem.casefold())
+            if name in ('error', 'crash') or name.startswith('unins') or any(word in name for word in helpers):
+                continue
+            executables.append(path)
+        executables.sort(key=lambda p: (-p.stat().st_size, p.name.casefold()))
+        for executable in executables[:4]:
+            art = executable_icon(executable, cache)
+            if art:
+                return art
+    return None
+
+
 def battlenet_product_state(fields):
     cached = protobuf(fields.get(4, [b''])[0])
     state = protobuf(cached.get(1, [b''])[0])
@@ -273,13 +301,7 @@ class Library:
                     continue
                 title, code = BNET.get(uid.casefold(), (location.name, None))
                 arguments = ['--exec=launch ' + code] if code else []
-                art = first_file(sorted(location.glob('*.ico')))
-                if not art:
-                    executables = [p for p in location.glob('*.exe') if not any(word in p.name.lower() for word in ('launcher', 'uninstall', 'error', 'crash'))]
-                    executables.sort(key=lambda p: p.stat().st_size, reverse=True)
-                    for exe in executables[:4]:
-                        art = executable_icon(exe, self.base / 'library-artwork')
-                        if art: break
+                art = battlenet_artwork(location, self.base / 'library-artwork')
                 self.add('battlenet', uid, title, location, arguments, art, ready)
             except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
                 self.warn('battlenet', 'An installation record could not be read. Refresh after Battle.net finishes updating.')
