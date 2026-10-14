@@ -250,6 +250,22 @@ class LibraryTests(unittest.TestCase):
         location.rmdir()
         self.assertEqual(self.lib.scan()['games'], [])
 
+    def test_battlenet_client_artwork_precedes_executable_icons(self):
+        location = self.bnet(uid='w1')
+        with patch.object(library, 'battlenet_client_icon', return_value='logo.svg') as client, \
+             patch.object(library, 'battlenet_artwork') as executable:
+            self.assertEqual(self.lib.scan()['games'][0]['artwork'], 'logo.svg')
+        client.assert_called_once_with(self.base / 'bottle/drive_c/Program Files (x86)/Battle.net',
+                                       'w1', self.base / 'library-artwork')
+        executable.assert_not_called()
+
+    def test_battlenet_missing_client_artwork_uses_game_icon(self):
+        location = self.bnet(uid='w2bn')
+        with patch.object(library, 'battlenet_client_icon', return_value=None), \
+             patch.object(library, 'battlenet_artwork', return_value='game.ico') as executable:
+            self.assertEqual(self.lib.scan()['games'][0]['artwork'], 'game.ico')
+        executable.assert_called_once_with(location, self.base / 'library-artwork')
+
     def test_warcraft_remaster_artwork_comes_from_x86_executables(self):
         for uid, folder, executable in [('w1r', 'Warcraft I', 'Warcraft.exe'),
                                          ('w2r', 'Warcraft II', 'Warcraft II.exe')]:

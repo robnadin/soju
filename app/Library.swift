@@ -440,7 +440,7 @@ struct GameArtwork: View {
         ZStack {
             LinearGradient(colors: [game.platform.accent.opacity(0.55), Color(red: 0.06, green: 0.09, blue: 0.13)], startPoint: .topLeading, endPoint: .bottomTrailing)
             if let artwork {
-                if game.artwork?.lowercased().hasSuffix(".ico") == true {
+                if ["ico", "svg"].contains((game.artwork.map { URL(fileURLWithPath: $0).pathExtension.lowercased() }) ?? "") {
                     Image(nsImage: artwork).resizable().scaledToFit().padding(38).shadow(color: .black.opacity(0.35), radius: 16, y: 8)
                 } else {
                     GeometryReader { proxy in

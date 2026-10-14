@@ -12,7 +12,7 @@ import re
 import sqlite3
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from game_artwork import executable_icon
+from game_artwork import executable_icon, battlenet_client_icon
 from library_services import saved_accounts
 from urllib.parse import quote
 
@@ -301,7 +301,9 @@ class Library:
                     continue
                 title, code = BNET.get(uid.casefold(), (location.name, None))
                 arguments = ['--exec=launch ' + code] if code else []
-                art = battlenet_artwork(location, self.base / 'library-artwork')
+                cache = self.base / 'library-artwork'
+                client = case_path(prefix / 'drive_c', CLIENTS['battlenet'].split('/')).parent
+                art = battlenet_client_icon(client, uid, cache) or battlenet_artwork(location, cache)
                 self.add('battlenet', uid, title, location, arguments, art, ready)
             except (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError):
                 self.warn('battlenet', 'An installation record could not be read. Refresh after Battle.net finishes updating.')
